@@ -1,0 +1,6 @@
+.idea
+workerman-ripple.imi
+.php-cs-fixer.cache
+
+/vendor/
+composer.lock

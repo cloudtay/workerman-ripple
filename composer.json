@@ -1,0 +1,29 @@
+{
+  "name": "cclilshy/workerman-ripple",
+  "autoload": {
+    "psr-4": {
+      "Workerman\\Ripple\\": "src/"
+    }
+  },
+  "authors": [
+    {
+      "name": "cclilshy",
+      "email": "jingnigg@gmail.com"
+    }
+  ],
+  "require": {
+    "php": ">=8.1",
+    "ext-pcntl": "*",
+    "ext-posix": "*",
+    "ext-sockets": "*",
+    "cloudtay/ripple": "^1.0",
+    "walkor/workerman": "^4.1",
+    "cloudtay/ripple-http": "^0.3.0"
+  },
+  "require-dev": {
+    "friendsofphp/php-cs-fixer": "*",
+    "phpunit/phpunit": "*"
+  },
+  "minimum-stability": "dev",
+  "prefer-stable": true
+}
