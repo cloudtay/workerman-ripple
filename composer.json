@@ -1,5 +1,5 @@
 {
-  "name": "cclilshy/workerman-ripple",
+  "name": "cloudtay/workerman-ripple",
   "autoload": {
     "psr-4": {
       "Workerman\\Ripple\\": "src/"
@@ -16,9 +16,9 @@
     "ext-pcntl": "*",
     "ext-posix": "*",
     "ext-sockets": "*",
-    "cloudtay/ripple": "^1.0",
     "walkor/workerman": "^4.1",
-    "cloudtay/ripple-http": "^0.3.0"
+    "cloudtay/ripple": "^1.0",
+    "cloudtay/ripple-http": "^1.0"
   },
   "require-dev": {
     "friendsofphp/php-cs-fixer": "*",
