@@ -10,14 +10,14 @@ use Workerman\Worker;
 $worker = new Worker('text://127.0.0.1:8001');
 
 $worker->onWorkerStart = static function () {
-    $asyncTcpConnection = Utils::asyncTcpConnection('ssl://www.google.com:443');
+    $asyncTcpConnection            = Utils::asyncTcpConnection('ssl://ipconfig.io:443');
     $asyncTcpConnection->onConnect = static function (TcpConnection $connection) {
-        echo 'Connected to google.com' , \PHP_EOL;
-        $connection->send("GET / HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n");
+        echo 'Connected to ipconfig.io', \PHP_EOL;
+        $connection->send("GET /ip HTTP/1.1\r\nHost: ipconfig.io\r\nConnection: close\r\n\r\n");
     };
 
     $asyncTcpConnection->onMessage = static function (TcpConnection $connection, string $data) {
-        echo 'Received data from google.com: ' . \substr($data, 0, 10),'...' . \PHP_EOL;
+        echo 'Received data from baidu.com: ', $data, \PHP_EOL;
     };
 
     $asyncTcpConnection->connectViaProxy('socks5://127.0.0.1:1080');
@@ -32,7 +32,7 @@ $worker->onMessage = static function (TcpConnection $connection, string $data) {
         case 'curl':
             try {
                 $guzzle = Utils::guzzle();
-                $response = $guzzle->get('https://www.baidu.com');
+                $response = $guzzle->get('https://ipconfig.io');
                 $connection->send('status: ' . $response->getStatusCode());
             } catch (Throwable $e) {
                 $connection->send('error: ' . $e->getMessage());

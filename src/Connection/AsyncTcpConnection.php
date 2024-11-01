@@ -12,34 +12,30 @@
 
 namespace Workerman\Ripple\Connection;
 
+use Closure;
 use Co\IO;
-use Exception;
 use Ripple\Socket\Tunnel\Http;
 use Ripple\Socket\Tunnel\Socks5;
 use Ripple\Stream\Exception\ConnectionException;
-use Workerman\Events\EventInterface;
+use Workerman\Connection\TcpConnection;
 use Workerman\Worker;
 
 use function call_user_func;
-use function function_exists;
+use function intval;
+use function is_resource;
 use function method_exists;
 use function microtime;
 use function parse_url;
-use function round;
-use function socket_import_stream;
-use function socket_set_option;
-use function stream_set_blocking;
-use function stream_set_read_buffer;
-use function stream_socket_get_name;
+use function stream_context_create;
+use function stream_socket_client;
 
 use const DIRECTORY_SEPARATOR;
-use const SO_KEEPALIVE;
-use const SOL_SOCKET;
-use const SOL_TCP;
-use const TCP_NODELAY;
+use const STREAM_CLIENT_ASYNC_CONNECT;
 
 class AsyncTcpConnection extends \Workerman\Connection\AsyncTcpConnection
 {
+    private Closure|null $connectionFactory = null;
+
     /**
      * @param string $proxy
      *
@@ -47,50 +43,79 @@ class AsyncTcpConnection extends \Workerman\Connection\AsyncTcpConnection
      */
     public function connectViaProxy(string $proxy): void
     {
+        if (!$this->connectionFactory) {
+            $this->connectionFactory = fn () => $this->connectViaProxy($proxy);
+        }
+
         if ($this->transport === 'unix') {
             $this->connect();
+        }
+
+        if ($this->status !== self::STATUS_INITIAL && $this->status !== self::STATUS_CLOSING &&
+            $this->status !== self::STATUS_CLOSED) {
             return;
         }
 
-        if ($this->_status !== self::STATUS_INITIAL && $this->_status !== self::STATUS_CLOSING &&
-            $this->_status !== self::STATUS_CLOSED) {
-            return;
+        if (!$this->eventLoop) {
+            $this->eventLoop = Worker::$globalEvent;
         }
-        $this->_status           = self::STATUS_CONNECTING;
-        $this->_connectStartTime = microtime(true);
 
-        /*** Ripple:Overwrite */
-        try {
-            $this->_socket = $this->connectProxy($proxy);
-        } catch (Exception $e) {
-            $this->emitError(WORKERMAN_CONNECT_FAIL, $e->getMessage());
-            if ($this->_status === self::STATUS_CLOSING) {
+        $this->status           = self::STATUS_CONNECTING;
+        $this->connectStartTime = microtime(true);
+        if (!$this->remotePort) {
+            $this->remotePort    = $this->transport === 'ssl' ? 443 : 80;
+            $this->remoteAddress = $this->remoteHost . ':' . $this->remotePort;
+        }
+        // Open socket connection asynchronously.
+        if ($this->proxySocks5) {
+            $this->socketContext['ssl']['peer_name'] = $this->remoteHost;
+            $context                                 = stream_context_create($this->socketContext);
+            $this->socket                            = stream_socket_client("tcp://$this->proxySocks5", $errno, $err_str, 0, STREAM_CLIENT_ASYNC_CONNECT, $context);
+        } elseif ($this->proxyHttp) {
+            $this->socketContext['ssl']['peer_name'] = $this->remoteHost;
+            $context                                 = stream_context_create($this->socketContext);
+            $this->socket                            = stream_socket_client("tcp://$this->proxyHttp", $errno, $err_str, 0, STREAM_CLIENT_ASYNC_CONNECT, $context);
+        } elseif ($this->socketContext) {
+            $context = stream_context_create($this->socketContext);
+            try {
+                $this->socket = $this->connectProxy($proxy, $context);
+            } catch (ConnectionException $e) {
+                $err_str = $e->getMessage();
+            }
+        } else {
+            try {
+                $this->socket = $this->connectProxy($proxy);
+            } catch (ConnectionException $e) {
+                $err_str = $e->getMessage();
+            }
+        }
+        // If failed attempt to emit onError callback.
+        if (!$this->socket || !is_resource($this->socket)) {
+            $this->emitError(static::CONNECT_FAIL, $err_str);
+            if ($this->status === self::STATUS_CLOSING) {
                 $this->destroy();
             }
-            if ($this->_status === self::STATUS_CLOSED) {
+            if ($this->status === self::STATUS_CLOSED) {
                 $this->onConnect = null;
             }
             return;
         }
-        /** Ripple:Overwrite-end */
-
-        // If failed attempt to emit onError callback.
-
-        // Add socket to global event loop waiting connection is successfully established or faild.
-        Worker::$globalEvent->add($this->_socket, EventInterface::EV_WRITE, array($this, 'checkConnection'));
+        // Add socket to global event loop waiting connection is successfully established or failed.
+        $this->eventLoop->onWritable($this->socket, $this->checkConnection(...));
         // For windows.
-        if (DIRECTORY_SEPARATOR === '\\') {
-            Worker::$globalEvent->add($this->_socket, EventInterface::EV_EXCEPT, array($this, 'checkConnection'));
+        if (DIRECTORY_SEPARATOR === '\\' && method_exists($this->eventLoop, 'onExcept')) {
+            $this->eventLoop->onExcept($this->socket, $this->checkConnection(...));
         }
     }
 
     /**
-     * @param string $proxy
+     * @param string     $proxy
+     * @param mixed|null $context
      *
      * @return mixed
      * @throws \Ripple\Stream\Exception\ConnectionException
      */
-    protected function connectProxy(string $proxy): mixed
+    protected function connectProxy(string $proxy, mixed $context = null): mixed
     {
         $parse = parse_url($proxy);
         if (!isset($parse['host'], $parse['port'])) {
@@ -98,9 +123,10 @@ class AsyncTcpConnection extends \Workerman\Connection\AsyncTcpConnection
         }
 
         $payload = [
-            'host' => $this->_remoteHost,
-            'port' => $this->_remotePort
+            'host' => $this->remoteHost,
+            'port' => intval($this->remotePort)
         ];
+
         if (isset($parse['user'], $parse['pass'])) {
             $payload['username'] = $parse['user'];
             $payload['password'] = $parse['pass'];
@@ -122,92 +148,23 @@ class AsyncTcpConnection extends \Workerman\Connection\AsyncTcpConnection
                 throw new ConnectionException('Unsupported proxy protocol', ConnectionException::CONNECTION_ERROR);
         }
 
-        if ($this->transport === 'ssl') {
-            $tunnelSocket->enableSSL();
-            $this->_sslHandshakeCompleted = true;
-        }
         return $tunnelSocket->stream;
     }
 
     /**
-     * @Ripple:Hook
+     * @param int $after
+     *
      * @return void
      */
-    public function checkConnection(): void
+    public function reconnect(int $after = 0): void
     {
-        // Remove EV_EXPECT for windows.
-        if (DIRECTORY_SEPARATOR === '\\') {
-            Worker::$globalEvent->del($this->_socket, EventInterface::EV_EXCEPT);
-        }
-
-        // Remove write listener.
-        Worker::$globalEvent->del($this->_socket, EventInterface::EV_WRITE);
-
-        if ($this->_status !== self::STATUS_CONNECTING) {
+        if (!$this->connectionFactory) {
+            parent::reconnect($after);
             return;
         }
 
-        // Check socket state.
-        if ($address = stream_socket_get_name($this->_socket, true)) {
-            // Nonblocking.
-            stream_set_blocking($this->_socket, false);
-            // Compatible with hhvm
-            if (function_exists('stream_set_read_buffer')) {
-                stream_set_read_buffer($this->_socket, 0);
-            }
-            // Try to open keepalive for tcp and disable Nagle algorithm.
-            if (function_exists('socket_import_stream') && $this->transport === 'tcp') {
-                $raw_socket = socket_import_stream($this->_socket);
-                socket_set_option($raw_socket, SOL_SOCKET, SO_KEEPALIVE, 1);
-                socket_set_option($raw_socket, SOL_TCP, TCP_NODELAY, 1);
-            }
-
-            /*** Ripple:Overwrite */
-            // SSL handshake.
-            if ($this->transport === 'ssl' && !$this->_sslHandshakeCompleted) {
-                /*** Ripple:Overwrite-end */
-                $this->_sslHandshakeCompleted = $this->doSslHandshake($this->_socket);
-                if ($this->_sslHandshakeCompleted === false) {
-                    return;
-                }
-            } else {
-                // There are some data waiting to send.
-                if ($this->_sendBuffer) {
-                    Worker::$globalEvent->add($this->_socket, EventInterface::EV_WRITE, array($this, 'baseWrite'));
-                }
-            }
-
-            // Register a listener waiting read event.
-            Worker::$globalEvent->add($this->_socket, EventInterface::EV_READ, array($this, 'baseRead'));
-
-            $this->_status        = self::STATUS_ESTABLISHED;
-            $this->_remoteAddress = $address;
-
-            // Try to emit onConnect callback.
-            if ($this->onConnect) {
-                try {
-                    call_user_func($this->onConnect, $this);
-                } catch (Exception $e) {
-                    Worker::stopAll(250, $e);
-                }
-            }
-            // Try to emit protocol::onConnect
-            if ($this->protocol && method_exists($this->protocol, 'onConnect')) {
-                try {
-                    call_user_func(array($this->protocol, 'onConnect'), $this);
-                } catch (Exception $e) {
-                    Worker::stopAll(250, $e);
-                }
-            }
-        } else {
-            // Connection failed.
-            $this->emitError(WORKERMAN_CONNECT_FAIL, 'connect ' . $this->_remoteAddress . ' fail after ' . round(microtime(true) - $this->_connectStartTime, 4) . ' seconds');
-            if ($this->_status === self::STATUS_CLOSING) {
-                $this->destroy();
-            }
-            if ($this->_status === self::STATUS_CLOSED) {
-                $this->onConnect = null;
-            }
-        }
+        $this->status = TcpConnection::STATUS_INITIAL;
+        \Co\sleep($after);
+        call_user_func($this->connectionFactory);
     }
 }

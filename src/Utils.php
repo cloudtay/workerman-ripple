@@ -54,7 +54,6 @@ class Utils
         return new AsyncTcpConnection($remoteAddress, $contextOption);
     }
 
-
     /**
      * @param array $config
      *
