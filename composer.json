@@ -11,6 +11,7 @@
       "email": "jingnigg@gmail.com"
     }
   ],
+  "license": "MIT",
   "require": {
     "php": ">=8.1",
     "ext-pcntl": "*",
