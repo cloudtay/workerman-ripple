@@ -19,6 +19,7 @@ use Ripple\Stream;
 use Throwable;
 use Workerman\Events\EventInterface;
 use Workerman\Worker;
+use Ripple\Utils\Format;
 
 use function array_search;
 use function call_user_func;
@@ -34,13 +35,11 @@ use function explode;
 use function function_exists;
 use function get_resource_id;
 use function getmypid;
-use function int2string;
 use function is_array;
 use function is_string;
 use function posix_getpid;
 use function sleep;
 use function str_contains;
-use function string2int;
 
 class Driver implements EventInterface
 {
@@ -98,9 +97,10 @@ class Driver implements EventInterface
                         return false;
                     }
 
+
                     $id                     = onSignal($fd, $closure);
-                    $this->_signal2ids[$fd] = string2int($id);
-                    return string2int($id);
+                    $this->_signal2ids[$fd] = Format::string2int($id);
+                    return Format::string2int($id);
                 } catch (Throwable) {
                     return false;
                 }
@@ -113,7 +113,7 @@ class Driver implements EventInterface
                         Worker::stopAll(250, $e);
                     }
                 }, $fd);
-                return string2int($timerId);
+                return Format::string2int($timerId);
 
             case EventInterface::EV_TIMER_ONCE:
                 $this->_timer[] = $timerId = delay(static function () use ($func, $args) {
@@ -123,7 +123,7 @@ class Driver implements EventInterface
                         Worker::stopAll(250, $e);
                     }
                 }, $fd);
-                return string2int($timerId);
+                return Format::string2int($timerId);
 
             case EventInterface::EV_READ:
                 $stream  = new Stream($fd);
@@ -131,8 +131,8 @@ class Driver implements EventInterface
                     $func($stream->stream);
                 });
 
-                $this->_fd2RIDs[$stream->id][] = string2int($eventId);
-                return string2int($eventId);
+                $this->_fd2RIDs[$stream->id][] = Format::string2int($eventId);
+                return Format::string2int($eventId);
 
             case EventInterface::EV_WRITE:
                 $stream  = new Stream($fd);
@@ -140,8 +140,8 @@ class Driver implements EventInterface
                     $func($stream->stream);
                 });
 
-                $this->_fd2WIDs[$stream->id][] = string2int($eventId);
-                return string2int($eventId);
+                $this->_fd2WIDs[$stream->id][] = Format::string2int($eventId);
+                return Format::string2int($eventId);
         }
         return false;
     }
@@ -159,7 +159,7 @@ class Driver implements EventInterface
     {
         if ($flag === EventInterface::EV_TIMER || $flag === EventInterface::EV_TIMER_ONCE) {
             $this->cancel($fd);
-            unset($this->_timer[array_search(int2string($fd), $this->_timer)]);
+            unset($this->_timer[array_search(Format::int2string($fd), $this->_timer)]);
             return;
         }
 
@@ -202,7 +202,7 @@ class Driver implements EventInterface
      */
     private function cancel(int $id): void
     {
-        cancel(int2string($id));
+        cancel(Format::int2string($id));
     }
 
     /**
@@ -226,7 +226,7 @@ class Driver implements EventInterface
         } elseif (Driver::$baseProcessId !== (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid())) {
             Driver::$baseProcessId = (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid());
             cancelAll();
-            System::Process()->forkedTick();
+            System::Process()->distributeForked();
         }
         wait();
 

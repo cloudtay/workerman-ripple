@@ -8,7 +8,7 @@ use function Co\wait;
 
 include __DIR__ . '/../vendor/autoload.php';
 
-$token  = readline('Please input your token: ');
+$token  = \readline('Please input your token: ');
 $header = [
     'Content-Type'    => 'application/json',
     'Authorization'   => "Bearer {$token}",
