@@ -75,7 +75,7 @@ class Driver implements EventInterface
             Driver::$baseProcessId = (getmypid());
 
             cancelAll();
-            System::Process()->forkedTick();
+            System::Process()->distributeForked();
         }
 
         wait();

@@ -13,10 +13,10 @@
 namespace Workerman\Ripple\Connection;
 
 use Closure;
-use Co\IO;
-use Ripple\Socket\Tunnel\Http;
-use Ripple\Socket\Tunnel\Socks5;
+use Ripple\Socket;
 use Ripple\Stream\Exception\ConnectionException;
+use Ripple\Tunnel\Http;
+use Ripple\Tunnel\Socks5;
 use Workerman\Connection\TcpConnection;
 use Workerman\Worker;
 
@@ -135,14 +135,14 @@ class AsyncTcpConnection extends \Workerman\Connection\AsyncTcpConnection
         switch ($parse['scheme']) {
             case 'socks':
             case 'socks5':
-                $tunnelSocket = Socks5::connect("tcp://{$parse['host']}:{$parse['port']}", $payload)->getSocketStream();
+                $tunnelSocket = Socks5::connect("tcp://{$parse['host']}:{$parse['port']}", $payload)->getSocket();
                 break;
             case 'http':
-                $tunnelSocket = Http::connect("tcp://{$parse['host']}:{$parse['port']}", $payload)->getSocketStream();
+                $tunnelSocket = Http::connect("tcp://{$parse['host']}:{$parse['port']}", $payload)->getSocket();
                 break;
             case 'https':
-                $tunnel       = IO::Socket()->connectWithSSL("tcp://{$parse['host']}:{$parse['port']}");
-                $tunnelSocket = Http::connect($tunnel, $payload)->getSocketStream();
+                $tunnel       = Socket::connectWithSSL("tcp://{$parse['host']}:{$parse['port']}");
+                $tunnelSocket = Http::connect($tunnel, $payload)->getSocket();
                 break;
             default:
                 throw new ConnectionException('Unsupported proxy protocol', ConnectionException::CONNECTION_ERROR);
