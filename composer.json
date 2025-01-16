@@ -17,7 +17,7 @@
     "ext-pcntl": "*",
     "ext-posix": "*",
     "ext-sockets": "*",
-    "walkor/workerman": "^4.1",
+    "workerman/workerman": "^4.1",
     "cloudtay/ripple": "^1.0",
     "cloudtay/ripple-http": "^1.0"
   },
