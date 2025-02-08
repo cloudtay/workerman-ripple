@@ -12,14 +12,14 @@
 
 namespace Workerman\Ripple;
 
-use Co\System;
 use Revolt\EventLoop;
 use Ripple\Kernel;
+use Ripple\Process\Process;
 use Workerman\Events\EventInterface;
+use Workerman\Worker;
 
 use function array_shift;
 use function Co\cancel;
-use function Co\cancelAll;
 use function Co\delay;
 use function Co\repeat;
 use function Co\stop;
@@ -69,13 +69,12 @@ class Driver implements EventInterface
      */
     public function run(): void
     {
-        if (!isset(Driver::$baseProcessId)) {
-            Driver::$baseProcessId = (getmypid());
-        } elseif (Driver::$baseProcessId !== (getmypid())) {
-            Driver::$baseProcessId = (getmypid());
+        if (!isset(static::$baseProcessId)) {
+            static::$baseProcessId = (getmypid());
+        } elseif (static::$baseProcessId !== (getmypid())) {
+            static::$baseProcessId = (getmypid());
 
-            cancelAll();
-            System::Process()->distributeForked();
+            Process::getInstance()->distributeForked();
         }
 
         wait();
@@ -279,5 +278,23 @@ class Driver implements EventInterface
     public function setErrorHandler(callable $errorHandler): void
     {
         EventLoop::setErrorHandler($errorHandler);
+    }
+
+    /**
+     * @return void
+     */
+    public static function configure(): void
+    {
+        static::$baseProcessId  = (getmypid());
+        Worker::$eventLoopClass = static::class;
+    }
+
+    /**
+     * @return void
+     */
+    public static function runAll(): void
+    {
+        static::configure();
+        Worker::runAll();
     }
 }
