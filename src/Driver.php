@@ -13,8 +13,8 @@
 namespace Workerman\Ripple;
 
 use Closure;
-use Co\System;
 use Ripple\Kernel;
+use Ripple\Process\Process;
 use Ripple\Stream;
 use Throwable;
 use Workerman\Events\EventInterface;
@@ -25,10 +25,10 @@ use function array_search;
 use function call_user_func;
 use function call_user_func_array;
 use function Co\cancel;
-use function Co\cancelAll;
 use function Co\delay;
 use function Co\onSignal;
 use function Co\repeat;
+use function Co\stop;
 use function Co\wait;
 use function count;
 use function explode;
@@ -221,12 +221,11 @@ class Driver implements EventInterface
      */
     public function loop(): void
     {
-        if (!isset(Driver::$baseProcessId)) {
-            Driver::$baseProcessId = (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid());
-        } elseif (Driver::$baseProcessId !== (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid())) {
-            Driver::$baseProcessId = (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid());
-            cancelAll();
-            System::Process()->distributeForked();
+        if (!isset(static::$baseProcessId)) {
+            static::$baseProcessId = (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid());
+        } elseif (static::$baseProcessId !== (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid())) {
+            static::$baseProcessId = (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid());
+            Process::getInstance()->distributeForked();
         }
         wait();
 
@@ -254,6 +253,24 @@ class Driver implements EventInterface
      */
     public function destroy(): void
     {
-        cancelAll();
+        stop();
+    }
+
+    /**
+     * @return void
+     */
+    public static function configure(): void
+    {
+        static::$baseProcessId  = (Kernel::getInstance()->supportProcessControl() ? getmypid() : posix_getpid());
+        Worker::$eventLoopClass = static::class;
+    }
+
+    /**
+     * @return void
+     */
+    public static function runAll(): void
+    {
+        static::configure();
+        Worker::runAll();
     }
 }
