@@ -1,6 +1,7 @@
 .idea
 workerman-ripple.iml
-.php-cs-fixer.cache
 
 /vendor/
 composer.lock
+
+.php-cs-fixer.cache

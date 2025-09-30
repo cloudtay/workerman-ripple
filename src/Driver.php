@@ -12,22 +12,28 @@
 
 namespace Workerman\Ripple;
 
-use Revolt\EventLoop;
-use Ripple\Kernel;
-use Ripple\Process\Process;
+use Closure;
+use Ripple\Event;
+use Ripple\Time;
 use Workerman\Events\EventInterface;
 use Workerman\Worker;
 
-use function array_shift;
-use function Co\cancel;
-use function Co\delay;
-use function Co\repeat;
-use function Co\stop;
+use function array_filter;
+use function array_values;
+use function call_user_func;
+use function call_user_func_array;
+use function Co\go;
+use function Co\sleep;
 use function Co\wait;
 use function count;
-use function getmypid;
+use function explode;
+use function function_exists;
+use function get_resource_id;
+use function is_array;
+use function is_string;
 use function pcntl_signal;
-use function sleep;
+use function spl_object_id;
+use function str_contains;
 
 use const SIG_IGN;
 use const SIGINT;
@@ -35,51 +41,41 @@ use const SIGINT;
 class Driver implements EventInterface
 {
     /**
-     * @var int|float
+     * @var array 定时器对象数组
      */
-    protected static int|float $baseProcessId;
+    protected array $_timer = [];
 
     /**
-     * @var array
+     * @var array 定时器ID到对象的映射
      */
-    protected array $readEvents = [];
+    protected array $_timerIds = [];
 
     /**
-     * @var array
+     * @var array 文件描述符到读取事件ID的映射
      */
-    protected array $writeEvents = [];
+    protected array $_fd2RIDs = [];
 
     /**
-     * @var array
+     * @var array 文件描述符到写入事件ID的映射
      */
-    protected array $eventSignal = [];
+    protected array $_fd2WIDs = [];
 
     /**
-     * @var array
+     * @var array 信号到事件ID的映射
      */
-    protected array $eventTimer = [];
-
-    /**
-     * @var int
-     */
-    protected int $timerId = 1;
+    protected array $_signal2ids = [];
 
     /**
      * @return void
      */
     public function run(): void
     {
-        if (!isset(static::$baseProcessId)) {
-            static::$baseProcessId = (getmypid());
-        } elseif (static::$baseProcessId !== (getmypid())) {
-            static::$baseProcessId = (getmypid());
-
-            Process::getInstance()->distributeForked();
-        }
-
-        wait();
-
+        /**
+         * 不会再有任何事发生
+         * Workerman会将结束的进程视为异常然后重启, 循环往复
+         */
         while (1) {
+            wait();
             sleep(1);
         }
     }
@@ -89,10 +85,8 @@ class Driver implements EventInterface
      */
     public function stop(): void
     {
-        stop();
-        if (Kernel::getInstance()->supportProcessControl()) {
-            pcntl_signal(SIGINT, SIG_IGN);
-        }
+        $this->destroy();
+        pcntl_signal(SIGINT, SIG_IGN);
     }
 
     /**
@@ -104,13 +98,14 @@ class Driver implements EventInterface
      */
     public function delay(float $delay, callable $func, array $args = []): int
     {
-        $timerId                    = $this->timerId++;
-        $closure                    = function () use ($func, $args, $timerId) {
-            unset($this->eventTimer[$timerId]);
-            $func(...$args);
-        };
-        $cbId = delay($closure, $delay);
-        $this->eventTimer[$timerId] = $cbId;
+        $timer = Time::afterFunc($delay, static function () use ($func, $args) {
+            call_user_func_array($func, $args);
+        });
+        $timerId = spl_object_id($timer);
+
+        $this->_timer[] = $timer;
+        $this->_timerIds[$timerId] = $timer;
+
         return $timerId;
     }
 
@@ -123,9 +118,21 @@ class Driver implements EventInterface
      */
     public function repeat(float $interval, callable $func, array $args = []): int
     {
-        $timerId                    = $this->timerId++;
-        $cbId = repeat(static fn () => $func(...$args), $interval);
-        $this->eventTimer[$timerId] = $cbId;
+        $ticker = Time::ticker($interval);
+        $timerId = spl_object_id($ticker);
+
+        $this->_timer[] = $ticker;
+        $this->_timerIds[$timerId] = $ticker;
+
+        go(static function () use ($ticker, $func, $args) {
+            while (!$ticker->isStopped()) {
+                $ticker->channel()->receive();
+                go(static function () use ($func, $args) {
+                    call_user_func_array($func, $args);
+                });
+            }
+        });
+
         return $timerId;
     }
 
@@ -137,13 +144,9 @@ class Driver implements EventInterface
      */
     public function onReadable($stream, callable $func): void
     {
-        $fdKey = (int)$stream;
-        if (isset($this->readEvents[$fdKey])) {
-            cancel($this->readEvents[$fdKey]);
-            unset($this->readEvents[$fdKey]);
-        }
-
-        $this->readEvents[$fdKey] = EventLoop::onReadable($stream, static fn () => $func($stream));
+        $eventId = Event::watchRead($stream, static fn () => go(static fn () => $func($stream)));
+        $streamId = get_resource_id($stream);
+        $this->_fd2RIDs[$streamId][] = $eventId;
     }
 
     /**
@@ -153,10 +156,16 @@ class Driver implements EventInterface
      */
     public function offReadable($stream): bool
     {
-        $fdKey = (int)$stream;
-        if (isset($this->readEvents[$fdKey])) {
-            cancel($this->readEvents[$fdKey]);
-            unset($this->readEvents[$fdKey]);
+        if (!$stream) {
+            return false;
+        }
+
+        $streamId = get_resource_id($stream);
+        if (isset($this->_fd2RIDs[$streamId])) {
+            foreach ($this->_fd2RIDs[$streamId] as $eventId) {
+                Event::unwatch($eventId);
+            }
+            unset($this->_fd2RIDs[$streamId]);
             return true;
         }
         return false;
@@ -170,12 +179,9 @@ class Driver implements EventInterface
      */
     public function onWritable($stream, callable $func): void
     {
-        $fdKey = (int)$stream;
-        if (isset($this->writeEvents[$fdKey])) {
-            cancel($this->writeEvents[$fdKey]);
-            unset($this->writeEvents[$fdKey]);
-        }
-        $this->writeEvents[$fdKey] = EventLoop::onWritable($stream, static fn () => $func($stream));
+        $eventId = Event::watchWrite($stream, static fn () => go(static fn () => $func($stream)));
+        $streamId = get_resource_id($stream);
+        $this->_fd2WIDs[$streamId][] = $eventId;
     }
 
     /**
@@ -185,10 +191,16 @@ class Driver implements EventInterface
      */
     public function offWritable($stream): bool
     {
-        $fdKey = (int)$stream;
-        if (isset($this->writeEvents[$fdKey])) {
-            cancel($this->writeEvents[$fdKey]);
-            unset($this->writeEvents[$fdKey]);
+        if (!$stream) {
+            return false;
+        }
+
+        $streamId = get_resource_id($stream);
+        if (isset($this->_fd2WIDs[$streamId])) {
+            foreach ($this->_fd2WIDs[$streamId] as $eventId) {
+                Event::unwatch($eventId);
+            }
+            unset($this->_fd2WIDs[$streamId]);
             return true;
         }
         return false;
@@ -199,16 +211,29 @@ class Driver implements EventInterface
      * @param callable $func
      *
      * @return void
-     * @throws \Revolt\EventLoop\UnsupportedFeatureException
      */
     public function onSignal(int $signal, callable $func): void
     {
-        $fdKey = $signal;
-        if (isset($this->eventSignal[$fdKey])) {
-            cancel($this->eventSignal[$fdKey]);
-            unset($this->eventSignal[$fdKey]);
+        // 兼容 Workerman 的信号处理
+        if ($func instanceof Closure) {
+            $closure = static fn () => go(static fn () => $func($signal));
+        } elseif (is_array($func)) {
+            $closure = static fn () => go(static fn () => call_user_func($func, $signal));
+        } elseif (is_string($func)) {
+            if (str_contains($func, '::')) {
+                $explode = explode('::', $func);
+                $closure = static fn () => go(static fn () => call_user_func($explode, $signal));
+            } elseif (function_exists($func)) {
+                $closure = static fn () => go(static fn () => $func($signal));
+            } else {
+                return;
+            }
+        } else {
+            return;
         }
-        $this->eventSignal[$fdKey] = EventLoop::onSignal($signal, static fn () => $func($signal));
+
+        $id = Event::watchSignal($signal, $closure);
+        $this->_signal2ids[$signal] = $id;
     }
 
     /**
@@ -218,10 +243,10 @@ class Driver implements EventInterface
      */
     public function offSignal(int $signal): bool
     {
-        $fdKey = $signal;
-        if (isset($this->eventSignal[$fdKey])) {
-            cancel($this->eventSignal[$fdKey]);
-            unset($this->eventSignal[$fdKey]);
+        $signalId = $this->_signal2ids[$signal] ?? null;
+        if ($signalId) {
+            Event::unwatch($signalId);
+            unset($this->_signal2ids[$signal]);
             return true;
         }
         return false;
@@ -244,9 +269,12 @@ class Driver implements EventInterface
      */
     public function offDelay(int $timerId): bool
     {
-        if (isset($this->eventTimer[$timerId])) {
-            cancel($this->eventTimer[$timerId]);
-            unset($this->eventTimer[$timerId]);
+        if (isset($this->_timerIds[$timerId])) {
+            $timer = $this->_timerIds[$timerId];
+            $timer->stop();
+
+            unset($this->_timerIds[$timerId]);
+            $this->_timer = array_values(array_filter($this->_timer, fn ($t) => $t !== $timer));
             return true;
         }
         return false;
@@ -257,9 +285,11 @@ class Driver implements EventInterface
      */
     public function deleteAllTimer(): void
     {
-        while ($cbId = array_shift($this->eventTimer)) {
-            cancel($cbId);
+        foreach ($this->_timer as $timer) {
+            $timer->stop();
         }
+        $this->_timer = [];
+        $this->_timerIds = [];
     }
 
     /**
@@ -267,7 +297,7 @@ class Driver implements EventInterface
      */
     public function getTimerCount(): int
     {
-        return count($this->eventTimer);
+        return count($this->_timer);
     }
 
     /**
@@ -277,16 +307,34 @@ class Driver implements EventInterface
      */
     public function setErrorHandler(callable $errorHandler): void
     {
-        EventLoop::setErrorHandler($errorHandler);
     }
 
     /**
      * @return void
      */
-    public static function configure(): void
+    public function destroy(): void
     {
-        static::$baseProcessId  = (getmypid());
-        Worker::$eventLoopClass = static::class;
+        // 清理所有定时器
+        $this->deleteAllTimer();
+
+        // 清理所有事件监听器
+        foreach ($this->_fd2RIDs as $eventIds) {
+            foreach ($eventIds as $eventId) {
+                Event::unwatch($eventId);
+            }
+        }
+        foreach ($this->_fd2WIDs as $eventIds) {
+            foreach ($eventIds as $eventId) {
+                Event::unwatch($eventId);
+            }
+        }
+        foreach ($this->_signal2ids as $eventId) {
+            Event::unwatch($eventId);
+        }
+
+        $this->_fd2RIDs = [];
+        $this->_fd2WIDs = [];
+        $this->_signal2ids = [];
     }
 
     /**
@@ -294,7 +342,7 @@ class Driver implements EventInterface
      */
     public static function runAll(): void
     {
-        static::configure();
+        Worker::$eventLoopClass = static::class;
         Worker::runAll();
     }
 }
